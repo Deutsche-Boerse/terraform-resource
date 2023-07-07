@@ -133,19 +133,35 @@ func (c *client) writeBackendConfig(outputDir string) (string, error) {
 }
 
 func (c *client) writePlanProviderConfig(outputDir string, planContents, planContentsJSON []byte) error {
-	// GZip JSON plan to save space:
-	// https://github.com/ljfranklin/terraform-resource/issues/115#issuecomment-619525494
-	// Not gzipping the binary plan for now to avoid migration issues.
+	// GZip plan to save space
 
-	encodedPlan := base64.StdEncoding.EncodeToString(planContents)
-	escapedPlan, err := json.Marshal(encodedPlan)
+	var encodedBuffer bytes.Buffer
+	base64Encoder := base64.NewEncoder(base64.StdEncoding, &encodedBuffer)
+	zw := gzip.NewWriter(base64Encoder)
+	if _, err := zw.Write(planContents); err != nil {
+		return err
+	}
+	if err := zw.Close(); err != nil {
+		return err
+	}
+	if err := base64Encoder.Close(); err != nil {
+		return err
+	}
+
+	escapedPlan, err := json.Marshal(encodedBuffer.String())
 	if err != nil {
 		return err
 	}
 
+	// encodedPlan := base64.StdEncoding.EncodeToString(planContents)
+	// escapedPlan, err := json.Marshal(encodedPlan)
+	// if err != nil {
+	// 	return err
+	// }
+
 	var encodedJSONBuffer bytes.Buffer
 	baseEncoder := base64.NewEncoder(base64.StdEncoding, &encodedJSONBuffer)
-	zw := gzip.NewWriter(baseEncoder)
+	zw = gzip.NewWriter(baseEncoder)
 	if _, err = zw.Write(planContentsJSON); err != nil {
 		return err
 	}
@@ -826,12 +842,27 @@ func (c *client) GetPlanFromBackend(planEnvName string) error {
 		return fmt.Errorf("state has no output for key %s", models.PlanContent)
 	}
 
-	decodedPlan, err := base64.StdEncoding.DecodeString(encodedPlan)
+	rawPlanReader := strings.NewReader(encodedPlan)
+	decodedReader := base64.NewDecoder(base64.StdEncoding, rawPlanReader)
+	zr, err := gzip.NewReader(decodedReader)
+
+	if err != nil {
+		return err
+	}
+	outputFile, err := os.OpenFile(c.model.PlanFileLocalPath, os.O_RDWR|os.O_CREATE, 0755)
 	if err != nil {
 		return err
 	}
 
-	if err = ioutil.WriteFile(c.model.PlanFileLocalPath, []byte(decodedPlan), 0755); err != nil {
+	if _, err := io.Copy(outputFile, zr); err != nil {
+		return err
+	}
+
+	if err := zr.Close(); err != nil {
+		return err
+	}
+
+	if err := outputFile.Close(); err != nil {
 		return err
 	}
 
